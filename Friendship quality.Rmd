@@ -1,0 +1,256 @@
+---
+title: "Hyewon project"
+author: "Ebby Raymundo"
+date: "3/22/2021"
+output: pdf_document
+---
+
+# Description
+This file takes Qualtrics data from phase 1 of the friendship survey and checks the data for anyone that has signed up twice, demographics portions that have been done twice, more than 1 person selecting the same friend, and unfinished demographic surveys. Sometimes people misspell their friend's name or one uses a nickname when signing up which can be accounted for by checking the outputs from this script.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(smodels)
+library(lubridate)
+```
+
+Slicing out Qualtrics metadata.
+```{r}
+enrollment <- read.csv("data/Consent and Enrollment.csv", header = TRUE) %>%
+              slice(-2)
+
+demographics <- read.csv("data/Demographics.csv", header = TRUE) %>%
+                slice(-2)
+```
+
+# People that signed up twice (finished)
+
+```{r}
+self_enrolled_twice <- enrollment %>%
+  slice(-1) %>%
+  mutate(
+    self_1 = str_trim(str_to_lower(self_1)),
+    self_8 = str_trim(str_to_lower(self_8)),
+    friend_1 = str_trim(str_to_lower(friend_1)),
+    friend_2 = str_trim(str_to_lower(friend_2))
+    ) %>%
+  group_by(self_1) %>%
+  mutate(name = sm_count(self_1)) %>%
+  group_by(self_8) %>%
+  mutate(email = sm_count(self_8)) %>%
+  filter(name != 1 | email != 1) %>%
+  select(self_1, self_8, friend_1, friend_2, name, email, subjectid)
+```
+
+# Demographics that have been done twice (finished)
+
+```{r}
+demographics_done_twice <- enrollment %>%
+  slice(-1) %>%
+  left_join(y = demographics[,c("Finished", "subjectid")], by = "subjectid") %>%
+  group_by(self_8) %>%
+  mutate(sm_count()) %>%
+  select(self_1, self_8, subjectid, count) %>%
+  filter(count != 1)
+```
+
+
+# Same friend is enrolled twice (finished)
+
+```{r}
+friend_enrolled_twice <- enrollment %>%
+  slice(-1) %>%
+  filter(friend_registered != "N/A (I am registering alone)") %>%
+  transmute(
+    self_1 = str_trim(str_to_lower(self_1)),
+    self_8 = str_trim(str_to_lower(self_8)),
+    friend_1 = str_trim(str_to_lower(friend_1)),
+    friend_2 = str_trim(str_to_lower(friend_2))
+    ) %>%
+  group_by(friend_1) %>%
+  mutate(name = sm_count(friend_1)) %>%
+  group_by(friend_2) %>%
+  mutate(email = sm_count(friend_2)) %>%
+  filter(name != 1 | email != 1)
+```
+
+# Showing anyone that hasn't finished the demographic survey (Finished)
+Just need name, email, and subject ID (for demographic URL survey)
+
+```{r}
+unfinished_demographics <- enrollment %>%
+  left_join(y = demographics[,c("Finished", "subjectid")], by = "subjectid") %>%
+  filter(is.na(Finished.y)) %>% # filtering on NAs doesn't work if you just do Finished.y == NA or "NA"
+  select(self_1, self_8, subjectid, Finished.y) # participant's own name and email
+```
+
+# Show people that have nominated someone but friend hasn't registered yet (Finished)
+Names and emails of both parties, mark the one that isn't registered. Mark how long it's been since they've nominated their friend
+
+```{r}
+currentDate = Sys.Date()
+
+friend_isnt_enrolled <- enrollment %>%
+  slice(-1) %>%
+  filter(friend_registered != "N/A (I am registering alone)") %>%
+  mutate(
+    self_1 = str_trim(str_to_lower(self_1)),
+    self_8 = str_trim(str_to_lower(self_8)),
+    friend_1 = str_trim(str_to_lower(friend_1)),
+    friend_2 = str_trim(str_to_lower(friend_2))
+    ) %>%
+  mutate(friend_enrolled = FALSE) %>%
+  mutate(friend_enrolled = if_else(friend_1 %in% self_1, TRUE, friend_enrolled)) %>%
+  mutate(friend_enrolled = if_else(friend_2 %in% self_8, TRUE, friend_enrolled)) %>%
+  mutate(EndDate = mdy_hm(EndDate)) %>%
+  mutate(days_since = difftime(currentDate, EndDate, units = "days")) %>%
+  filter(friend_enrolled == FALSE) %>%
+  select(EndDate, self_1, self_8, friend_1, friend_2, days_since, friend_registered, friend_prior_action, subjectid) %>%
+  arrange(desc(days_since))
+```
+
+# Reassigns people with unregistered friends, generates dyad IDs (run after friend_isnt_enrolled)
+
+```{r}
+set.seed(1)
+DID <- vector(length = 999) # resets/creates vector that contains used vs unused DIDs
+friendNames <- vector(length = 999)
+# Creates new DID that checks DID vector to see if randint chosen has already been used
+newDID <- function() {
+  
+  randint <- floor(runif(1, min = 100, max = 1000)) # actual max is 999 since it'll never equal 1000
+  
+  while(DID[randint] == TRUE) { # has already been used, try again
+    randint <- floor(runif(1, min = 100, max = 1000))
+  }
+  DID[randint] <<- TRUE
+  return(randint)
+}
+
+friend_ID <- function(ownName, friendName) {
+  index1 <- which(friendNames == ownName) # check if self has been seen yet
+  index2 <- which(friendNames == friendName)
+  
+  if (length(index1) == 0 & length(index2) == 0) { # friend not found yet, need new ID
+    createdDID <- newDID()
+    friendNames[createdDID] <<- ownName # neither name seen, put self in
+    return(createdDID)
+  }
+  return(index2) # either one of names seen, friend has been seen before
+}
+
+reassigned_enrollment <- enrollment %>%
+    mutate(
+    self_1 = str_trim(str_to_lower(self_1)),
+    self_8 = str_trim(str_to_lower(self_8)),
+    friend_1 = str_trim(str_to_lower(friend_1)),
+    friend_2 = str_trim(str_to_lower(friend_2))
+    ) %>%
+  mutate(friend_1 = ifelse(self_1 %in% friend_isnt_enrolled$self_1, "", friend_1)) %>%
+  mutate(friend_2 = ifelse(self_1 %in% friend_isnt_enrolled$self_1, "", friend_2)) %>%
+  mutate(friend_registered = ifelse(self_1 %in% friend_isnt_enrolled$self_1, "N/A (I am registering alone)", friend_registered)) %>%
+  mutate(friend_prior_action = ifelse(self_1 %in% friend_isnt_enrolled$self_1, "", friend_prior_action))
+
+dyad_ID <- reassigned_enrollment %>%
+  slice(-1) %>%
+  mutate(dyadid = NA) %>%
+  rowwise() %>%
+  mutate(dyadid = ifelse(friend_registered != "N/A (I am registering alone)", friend_ID(self_8, friend_2), dyadid)) %>%
+  arrange(dyadid)
+
+```
+
+# Master key (run after reassigned enrollment)
+
+```{r}
+master_key <- dyad_ID %>%
+  left_join(y = demographics[,c("Finished", "subjectid")], by = "subjectid") %>%
+  mutate(paired = ifelse(friend_registered != "N/A (I am registering alone)", TRUE, FALSE)) %>%
+  rename(name = self_1) %>%
+  rename(email = self_8) %>%
+  rename(finished_enrollment = Finished.x) %>%
+  rename(finished_demographics = Finished.y) %>%
+  select(subjectid, dyadid, name, email, finished_enrollment, finished_demographics, paired)
+```
+
+Run this if you already have a master key without conditions
+
+```{r}
+master_key <- read.csv("data/master_key.csv")
+```
+
+
+# Conditions
+
+```{r}
+set.seed(63) # can play around with the seed until you get a percentage split you like. Rerunning the chunk will give consistent results
+
+preassigned_control <- sum(master_key$paired == FALSE)
+num_participants <- nrow(master_key)
+control_probability <- 0.5 - (preassigned_control / num_participants)
+intervention_probability <- 1 - control_probability
+
+# prob: Subtract percentage dedicated to solo participants from control (0.5) for control probability, subtract previous calculation from 1 for remaining probability for intervention condition
+
+master_key <- master_key %>%
+  mutate(condition = "control") %>%
+  group_by(dyadid) %>%
+  mutate(condition = ifelse(
+    paired == TRUE,
+    sample(
+      c("control", "intervention"),
+      1,
+      replace = TRUE,
+      prob = c(control_probability, intervention_probability)
+      ),
+    condition
+    )
+  )
+
+sum(master_key$condition == "control") / num_participants # checks percentage of control
+```
+# Qualtrics links (run after conditions)
+
+```{r}
+qualtrics_links <- dyad_ID %>%
+  rowwise() %>%
+  mutate(link = str_interp("https://richmond.ca1.qualtrics.com/jfe/form/SV_5dOVnvtOliEnQCW?subjectid=${subjectid}&dyad_ID=${dyadid}&paired=${paired}&condition=${condition}&finished_demographics=${finished_demographics}")) %>%
+  select(self_8, link)
+
+```
+
+### Sampling methods
+
+```{r}
+#Approach: randomly selects from the conditions. May end up slightly off from ideal assignment (e.g. in a pool of 100 ppl, 52 in one group and 48 in the other)
+sample(c("control", "intervention"),
+       1,
+       replace = TRUE,
+       prob = c(0.5 - (sum(master_key$paired == FALSE) / nrow(master_key)), 1 - (0.5 - (sum(master_key$paired == FALSE) / nrow(master_key)))))
+
+# Possible second approach: Create a pool of "control" = total participants - solo, and "intervention" = number remaining and randomly pull from that with no replacement
+```
+
+
+
+# Export
+
+```{r}
+write.csv(friend_enrolled_twice, "friend_enrolled_twice.csv", row.names = FALSE)
+```
+```{r}
+write.csv(friend_isnt_enrolled, "friend_isnt_enrolled.csv", row.names = FALSE)
+```
+```{r}
+write.csv(self_enrolled_twice, "self_enrolled_twice.csv", row.names = FALSE)
+```
+```{r}
+write.csv(unfinished_demographics, "unfinished_demographics.csv", row.names = FALSE)
+```
+```{r}
+write.csv(master_key, "data/master_key.csv", row.names = FALSE)
+```
+```{r}
+write.csv(qualtrics_links, "data/qualtrics_links.csv", row.names = FALSE)
+```
