@@ -1,1 +1,1 @@
-The friendship quality file is used to process Qualtrics survey data to flag participants with incomplete surveys to send reminders.
+The friendship quality.Rmd file is used to process Qualtrics survey data to flag participants with incomplete surveys to send reminders. The time1test.py file creates some quick test data to validate parsing for data collection.
